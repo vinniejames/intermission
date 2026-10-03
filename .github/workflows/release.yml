@@ -37,8 +37,19 @@ jobs:
           git -C tyrquake checkout -q "$(cat engine/tyrquake-commit)"
           git -C tyrquake apply "$GITHUB_WORKSPACE/engine/tyrquake.patch"
 
+      # TyrQuake on Darwin compiles against SDL2.framework in /Library/Frameworks.
+      # `brew install sdl2` is sdl2-compat, and #include "SDL.h" only sees
+      # headers in that prefix's include/SDL2 directory.
       - name: Build
-        run: make -C tyrquake bin/tyr-quake USE_SDL=Y CD_TARGET=null -j3
+        run: |
+          sdl_prefix="$(brew --prefix sdl2 2>/dev/null || true)"
+          if [ ! -f "${sdl_prefix}/include/SDL2/SDL.h" ]; then
+            sdl_prefix="$(brew --prefix sdl2-compat)"
+          fi
+          test -f "$sdl_prefix/include/SDL2/SDL.h"
+          make -C tyrquake bin/tyr-quake USE_SDL=Y CD_TARGET=null -j3 \
+            SDL_CFLAGS="-I${sdl_prefix}/include/SDL2" \
+            SDL_LFLAGS="-L${sdl_prefix}/lib -lSDL2"
 
       # Copies the libraries into the app, so players need no Homebrew.
       # Homebrew's SDL2 is often sdl2-compat, which loads SDL3 at startup
