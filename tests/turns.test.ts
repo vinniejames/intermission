@@ -219,5 +219,7 @@ test('plays offline when the server never answers', async ($, on) => {
   // The pane stays open while a local game takes over
   expect(pane.engines.length).toBe(2)
   expect(pane.engines[1]).toContain('+map')
+  expect(pane.engines[1]).toContain('e1m1')
+  expect(String(pane.engines[1][0])).toContain('tyr-quake')
   expect(pane.closes).toBe(0)
 })

@@ -1,6 +1,6 @@
 {
   "name": "intermission",
-  "description": "Doom deathmatch while Claude works",
-  "owner": { "name": "Jarrod Watts" },
+  "description": "Quake deathmatch while Claude works",
+  "owner": { "name": "Vinnie James" },
   "plugins": [{ "name": "intermission", "source": "./" }]
 }

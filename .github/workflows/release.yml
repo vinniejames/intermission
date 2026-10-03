@@ -21,10 +21,6 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     env:
-      FREEDOOM: https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip
-      # The same freedoom2.wad the server runs, or players can't join
-      FREEDOOM2_SHA256: a8772e088847032510d97ba2312406a6998f21cbab44d4ff10696faa9c0ecd4b
-      SDL2_MIXER: SDL2_mixer-2.8.2
       PACKAGE: intermission-engine-macos-${{ matrix.arch }}.tar.gz
     steps:
       - uses: actions/checkout@v5
@@ -33,102 +29,83 @@ jobs:
         run: test "v$(jq -r .version .claude-plugin/plugin.json)" = "$GITHUB_REF_NAME"
 
       - name: Install build tools
-        run: brew install sdl2 dylibbundler
+        run: brew install sdl2 dylibbundler p7zip
 
-      # Doom's sounds are raw samples and Odamex plays music through macOS, so
-      # none of the codecs Homebrew's SDL2_mixer brings are needed, nor their
-      # licenses, some of them GPL-3 and LGPL
-      - name: Build SDL2_mixer without codecs
+      - name: Get TyrQuake with our changes
         run: |
-          curl -fsSL "https://github.com/libsdl-org/SDL_mixer/releases/download/release-${SDL2_MIXER#SDL2_mixer-}/$SDL2_MIXER.tar.gz" | tar -xz
-          cmake -S "$SDL2_MIXER" -B mixer-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/mixer" \
-            -DSDL2MIXER_SAMPLES=OFF -DSDL2MIXER_CMD=OFF -DSDL2MIXER_FLAC=OFF -DSDL2MIXER_GME=OFF \
-            -DSDL2MIXER_MOD=OFF -DSDL2MIXER_MP3=OFF -DSDL2MIXER_MIDI=OFF -DSDL2MIXER_OPUS=OFF \
-            -DSDL2MIXER_VORBIS=OFF -DSDL2MIXER_WAVPACK=OFF
-          cmake --build mixer-build -j3
-          cmake --install mixer-build
+          git clone -q https://github.com/sezero/tyrquake.git tyrquake
+          git -C tyrquake checkout -q "$(cat engine/tyrquake-commit)"
+          git -C tyrquake apply "$GITHUB_WORKSPACE/engine/tyrquake.patch"
 
-      - name: Get Odamex with our changes
-        run: |
-          git clone -q https://github.com/odamex/odamex.git odamex
-          git -C odamex checkout -q "$(cat engine/odamex-commit)"
-          git -C odamex submodule update -q --init --recursive --depth 1
-          git -C odamex apply ../engine/odamex.patch
-
-      # libpng and zstd built in rather than bundled from Homebrew
       - name: Build
-        run: |
-          cmake -S odamex -B odamex/build -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_CLIENT=1 -DBUILD_SERVER=0 -DBUILD_LAUNCHER=0 -DBUILD_TESTS=0 -DODAMEX_NO_GITVER=1 \
-            -DUSE_INTERNAL_PNG=1 -DUSE_INTERNAL_ZSTD=1 \
-            -DSDL2_MIXER_INCLUDE_DIR="$PWD/mixer/include/SDL2" \
-            -DSDL2_MIXER_LIBRARY="$PWD/mixer/lib/libSDL2_mixer-2.0.0.dylib"
-          cmake --build odamex/build -j3
+        run: make -C tyrquake bin/tyr-quake USE_SDL=Y CD_TARGET=null -j3
 
       # Copies the libraries into the app, so players need no Homebrew.
-      # Homebrew's SDL2 is sdl2-compat, which loads SDL3 at startup rather than
-      # linking it, so the bundler can't see it: put SDL3 where sdl2-compat
-      # looks first, beside itself. Without it, SDL2 waits on an error dialog
-      # nobody can see.
+      # Homebrew's SDL2 is often sdl2-compat, which loads SDL3 at startup
+      # rather than linking it, so put SDL3 beside it when it is installed.
       - name: Bundle libraries
         run: |
-          app=odamex/build/client/odamex.app
-          dylibbundler -od -b -x "$app/Contents/MacOS/odamex" -d "$app/Contents/libs" \
-            -p @executable_path/../libs/ -s "$PWD/mixer/lib"
-          cp "$(brew --prefix sdl3)/lib/libSDL3.0.dylib" "$app/Contents/libs/libSDL3.dylib"
-          chmod u+w "$app/Contents/libs/libSDL3.dylib"
-          install_name_tool -id @loader_path/libSDL3.dylib "$app/Contents/libs/libSDL3.dylib"
-          # --deep skips libs/, which isn't a place macOS looks for nested code,
-          # and macOS kills a process that loads a library whose signature broke
+          app=package/tyr-quake.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/libs"
+          cp tyrquake/bin/tyr-quake "$app/Contents/MacOS/tyr-quake"
+          chmod u+w "$app/Contents/MacOS/tyr-quake"
+          dylibbundler -od -b -x "$app/Contents/MacOS/tyr-quake" -d "$app/Contents/libs" \
+            -p @executable_path/../libs/
+          if [ -d "$(brew --prefix sdl3 2>/dev/null || true)" ] && [ -f "$(brew --prefix sdl3)/lib/libSDL3.0.dylib" ]; then
+            cp "$(brew --prefix sdl3)/lib/libSDL3.0.dylib" "$app/Contents/libs/libSDL3.dylib"
+            chmod u+w "$app/Contents/libs/libSDL3.dylib"
+            install_name_tool -id @loader_path/libSDL3.dylib "$app/Contents/libs/libSDL3.dylib"
+          fi
           codesign --force --sign - "$app"/Contents/libs/*.dylib
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>tyr-quake</string>
+            <key>CFBundleIdentifier</key><string>com.vinniejames.intermission.tyrquake</string>
+            <key>CFBundleName</key><string>intermission</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>15.0</string>
+          </dict></plist>
+          PLIST
           codesign --force --sign - "$app"
 
-      - name: Package
+      - name: Package the shareware episode
         run: |
-          mkdir -p package/licenses freedoom
-          cp -R odamex/build/client/odamex.app package/
-          curl -fsSL -o freedoom.zip "$FREEDOOM"
-          unzip -q -j freedoom.zip '*/freedoom2.wad' '*/COPYING.txt' -d freedoom
-          echo "$FREEDOOM2_SHA256  freedoom/freedoom2.wad" | shasum -a 256 -c
-          cp freedoom/freedoom2.wad package/
-
-          # Every license of what the engine contains, built in or bundled
-          cp odamex/LICENSE package/licenses/odamex.txt
-          cp odamex/3RD-PARTY-LICENSES package/licenses/odamex-third-party.txt
-          for license in libpng/LICENSE fltk/COPYING minilzo/COPYING jsoncpp/LICENSE fmt/LICENSE \
-            protobuf/LICENSE portmidi/license.txt cpptrace/LICENSE libadlmidi/LICENSE libadlmidi/LICENSE.GPL-3.txt; do
-            cp "odamex/libraries/$license" "package/licenses/$(dirname "$license")-$(basename "$license")"
-          done
-          cp odamex/build/libraries/cpptrace-build/_deps/zstd-src/LICENSE package/licenses/zstd.txt
-          cp "$(brew --prefix sdl2-compat)/LICENSE.txt" package/licenses/sdl2-compat.txt
-          cp "$(brew --prefix sdl3)/LICENSE.txt" package/licenses/sdl3.txt
-          cp "$SDL2_MIXER/LICENSE.txt" package/licenses/sdl2-mixer.txt
-          cp freedoom/COPYING.txt package/licenses/freedoom.txt
+          mkdir -p package/id1 package/licenses
+          sh engine/extract-pak0.sh package/id1
+          cp client/intermission.cfg package/id1/intermission.cfg
+          cp package/id1/slicnse.txt package/licenses/quake-shareware.txt
+          cp package/id1/readme.txt package/licenses/quake-shareware-readme.txt
+          rm -f package/id1/slicnse.txt package/id1/readme.txt package/id1/licinfo.txt
+          cp tyrquake/gnu.txt package/licenses/tyrquake-gpl.txt
+          cp tyrquake/readme-id.txt package/licenses/quake-engine.txt
+          if [ -f "$(brew --prefix sdl2)/LICENSE.txt" ]; then
+            cp "$(brew --prefix sdl2)/LICENSE.txt" package/licenses/sdl2.txt
+          fi
+          sdl2_prefix=$(brew --prefix sdl2-compat 2>/dev/null || true)
+          if [ -n "$sdl2_prefix" ] && [ -f "$sdl2_prefix/LICENSE.txt" ]; then
+            cp "$sdl2_prefix/LICENSE.txt" package/licenses/sdl2-compat.txt
+          fi
+          if [ -f "$(brew --prefix sdl3 2>/dev/null || echo /nonexistent)/LICENSE.txt" ]; then
+            cp "$(brew --prefix sdl3)/LICENSE.txt" package/licenses/sdl3.txt
+          fi
           cat > package/SOURCE.txt <<EOF
-          This engine is Odamex at commit $(cat engine/odamex-commit) with the changes in
-          https://github.com/jarrodwatts/intermission/blob/$GITHUB_REF_NAME/engine/odamex.patch applied.
-          Odamex's source, with the libraries it builds in, is at https://github.com/odamex/odamex.
-          SDL is at https://github.com/libsdl-org. The licenses are in licenses/.
+          This engine is TyrQuake at commit $(cat engine/tyrquake-commit) with the changes in
+          https://github.com/vinniejames/intermission/blob/$GITHUB_REF_NAME/engine/tyrquake.patch applied.
+          TyrQuake is at https://github.com/sezero/tyrquake (GPL-2.0).
+          The game data is id Software's Quake 1.06 shareware pak0.pak only.
+          Upstream of this mod is https://github.com/jarrodwatts/intermission.
           EOF
 
-      # A packaged engine that never draws a frame would ship looking fine. The
-      # runner's macOS can let a broken library signature pass that a player's
-      # newer macOS won't, so check those too, and that nothing new got bundled
-      # whose license isn't in the package.
       - name: Check the packaged engine
         run: |
-          for lib in package/odamex.app/Contents/libs/*; do
-            case "$(basename "$lib")" in
-              libSDL2-*.dylib | libSDL2_mixer-*.dylib | libSDL3.dylib) echo "bundled: $(basename "$lib")" ;;
-              *) echo "bundled $(basename "$lib"), whose license isn't in the package"; exit 1 ;;
-            esac
-          done
-          codesign --verify --strict package/odamex.app/Contents/libs/*.dylib package/odamex.app
+          codesign --verify --strict package/tyr-quake.app/Contents/libs/*.dylib package/tyr-quake.app
           printf '1 0\n' > input.txt
-          SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software SDL_AUDIODRIVER=dummy \
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
             INTERMISSION_FRAMES=/imci- INTERMISSION_INPUT="$PWD/input.txt" \
-            perl -e 'alarm 10; exec @ARGV' package/odamex.app/Contents/MacOS/odamex \
-            -iwad package/freedoom2.wad -config "$PWD/check.cfg" -width 320 -height 200 +map MAP01 \
+            perl -e 'alarm 12; exec @ARGV' package/tyr-quake.app/Contents/MacOS/tyr-quake \
+            -basedir "$PWD/package" -window -width 640 -height 360 +exec intermission.cfg +map e1m1 \
             > frames.log 2>&1 || true
           frames=$(grep -c '^@frame' frames.log || true)
           echo "drew $frames frames"
@@ -141,6 +118,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Both builds try to create the release; whichever is second finds it there
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "" || true
           gh release upload "$GITHUB_REF_NAME" "$PACKAGE" --clobber

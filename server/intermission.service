@@ -1,13 +1,13 @@
 [Unit]
-Description=intermission Doom server
+Description=intermission Quake server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=odamex
+User=quake
 WorkingDirectory=/opt/intermission
 Environment=HOME=/opt/intermission
-ExecStart=/opt/intermission/odasrv -iwad /opt/intermission/freedoom2.wad -port 10666 +exec /opt/intermission/intermission.cfg
+ExecStart=/opt/intermission/tyr-quake -dedicated 16 -basedir /opt/intermission -port 26000 +exec intermission.cfg
 Restart=always
 RestartSec=2
 

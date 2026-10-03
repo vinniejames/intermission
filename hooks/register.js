@@ -1,4 +1,4 @@
-// intermission: drops you into Doom while Claude works and hands you back when
+// intermission: drops you into Quake deathmatch while Claude works and hands you back when
 // it's done, or as soon as it needs you.
 
 const PANE = 'intermission'
@@ -6,17 +6,20 @@ const WIDTH = 640
 const HEIGHT = 360
 const DROP_IN_DELAY_MS = 2000
 const COUNTDOWN_SECONDS = 3
-const SERVER = '157.245.140.115:10666'
+// No public server is hosted for this fork. The name does not resolve, so
+// the mod falls back to the shareware episode. deploy.sh starts one; point
+// this at that host (NetQuake port 26000) to share a deathmatch.
+const SERVER = 'quake.intermission.invalid'
 // Between drop-ins the engine waits on the server as a spectator; after this
 // long it disconnects, so idle sessions don't hold the server's slots
 const AWAY_DISCONNECT_MS = 5 * 60 * 1000
 // Long enough for a slow connection; some networks never let it through at all
 const CONNECT_TIMEOUT_MS = 10 * 1000
 
-const RELEASES = 'https://github.com/jarrodwatts/intermission/releases/download'
+const RELEASES = 'https://github.com/vinniejames/intermission/releases/download'
 
 const NAME_STARTS = ['Idle', 'Bored', 'Queued', 'Pending', 'Async', 'Blocked', 'Lazy']
-const NAME_ENDS = ['Dev', 'Coder', 'Hacker', 'Intern', 'Marine', 'Imp']
+const NAME_ENDS = ['Dev', 'Coder', 'Ranger', 'Grunt', 'Shambler', 'Fiend']
 
 // Whether the person turned intermission on, and their name in the game, both
 // kept between sessions in $.store
@@ -174,7 +177,7 @@ async function needsYou($) {
 }
 
 function enginePath(root) {
-  return root + '/dist/odamex.app/Contents/MacOS/odamex'
+  return root + '/dist/tyr-quake.app/Contents/MacOS/tyr-quake'
 }
 
 // Each plugin version downloads the engine built for it, once
@@ -197,7 +200,7 @@ async function downloadEngine($) {
     if (system !== 'Darwin') throw new Error('it runs on macOS for now')
     const { version } = JSON.parse(await $.fs.read(root + '/.claude-plugin/plugin.json'))
     const archive = root + '/engine.tar.gz'
-    showStatus('Downloading the game, about 40 MB…')
+    showStatus('Downloading the game, about 30 MB…')
     const fetched = await $.process.run(
       ['curl', '-fsSL', '--retry', '2', '-o', archive, RELEASES + '/v' + version + '/intermission-engine-macos-' + arch + '.tar.gz'],
       { timeoutMs: 10 * 60 * 1000 },
@@ -217,22 +220,18 @@ function engineRequest(root, id) {
   return {
     argv: [
       enginePath(root),
-      '-iwad', root + '/dist/freedoom2.wad',
-      // Its own settings, so a person's own Odamex setup is never touched
-      '-config', '/tmp/intermission-' + id + '.cfg',
+      // Its own directory, so a person's own Quake or TyrQuake setup is never touched
+      '-basedir', root + '/dist',
+      '-window',
       '-width', String(WIDTH),
       '-height', String(HEIGHT),
-      '+vid_fullscreen', '0',
-      '+vid_maxfps', '35',
-      // Odamex's macOS music player ignores volume changes, so it played on
-      // while muted between drop-ins; its built-in OPL synth mixes through SDL
-      '+snd_musicsystem', '4',
-      '+cl_name', name,
-      ...(isOffline ? ['+map', 'MAP01'] : ['+connect', SERVER]),
+      '+exec', 'intermission.cfg',
+      '+name', name,
+      // NetQuake's default port is 26000, which is what the server listens on
+      ...(isOffline ? ['+map', 'e1m1'] : ['+connect', SERVER]),
     ],
     env: {
       SDL_VIDEODRIVER: 'dummy',
-      SDL_RENDER_DRIVER: 'software',
       // A per-run name keeps two sessions' frames from colliding
       INTERMISSION_FRAMES: '/im' + id + '-',
       INTERMISSION_INPUT: inputPath,
@@ -334,7 +333,7 @@ export function register(on) {
     }
     await $.command.register({
       name: 'intermission',
-      description: 'Play Doom while Claude works',
+      description: 'Play Quake deathmatch while Claude works',
       argumentHint: '[off]',
     })
     return next(e)
@@ -426,7 +425,7 @@ export function register(on) {
     return Box({
       flexDirection: 'column',
       children: [
-        Button({ key: 'play', label: 'Play Doom while Claude works', hotkey: '1', plain: true, onPress: () => acceptOffer($) }),
+        Button({ key: 'play', label: 'Play Quake while Claude works', hotkey: '1', plain: true, onPress: () => acceptOffer($) }),
         ...(others ? [others] : []),
       ],
     })
@@ -449,7 +448,7 @@ export function register(on) {
           Text({ bold: true, children: ['intermission is on'] }),
           Text({
             children: [
-              'When Claude has been working for 2 seconds you drop into Doom here, and you get handed back when it is done or needs you.',
+              'When Claude has been working for 2 seconds you drop into Quake deathmatch here, and you get handed back when it is done or needs you.',
             ],
           }),
           ...(downloadStatus ? [Text({ children: [downloadStatus] })] : []),
@@ -477,12 +476,12 @@ export function register(on) {
         ? Text({ bold: true, children: ["Claude's done · back in " + countdown] })
         : Text({
             dimColor: true,
-            children: ['Click the game to play and lock the mouse · Esc or ⌘ releases it · WASD or arrows · left click fires · right click runs · space opens'],
+            children: ['Click the game to play and lock the mouse · Esc or ⌘ releases it · WASD or arrows · left click fires · right click runs · space jumps'],
           })
     return Box({
       flexDirection: 'column',
       children: [
-        Image({ key: 'view', source: shmSource(frame), columns, rows, alt: 'Doom' }),
+        Image({ key: 'view', source: shmSource(frame), columns, rows, alt: 'Quake' }),
         // Laid over the picture, so clicks land on the game
         Box({
           position: 'absolute',

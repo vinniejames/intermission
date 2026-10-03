@@ -1,0 +1,759 @@
+diff --git a/Makefile b/Makefile
+index 78aacd9..f753cdc 100644
+--- a/Makefile
++++ b/Makefile
+@@ -704,6 +704,7 @@ COMMON_OBJS := \
+ 	zone.o
+ 
+ CL_OBJS := \
++	intermission.o	\
+ 	alias_model.o	\
+ 	cd_common.o	\
+ 	cl_demo.o	\
+@@ -904,6 +905,10 @@ QWSV_LFLAGS += -mconsole
+ endif
+ ifeq ($(TARGET_OS),UNIX)
+ COMMON_CPPFLAGS += -DELF
++ifeq ($(TARGET_UNIX),darwin)
++# intermission mouse-lock, same approach as the Doom build
++NQCL_LFLAGS += -framework ApplicationServices -framework CoreFoundation -framework CoreGraphics
++endif
+ COMMON_OBJS += net_udp.o sys_unix.o
+ COMMON_LIBS += m
+ NQCL_OBJS   += net_bsd.o
+diff --git a/NQ/cl_main.c b/NQ/cl_main.c
+index 3dba9c7..875a539 100644
+--- a/NQ/cl_main.c
++++ b/NQ/cl_main.c
+@@ -806,6 +806,9 @@ CL_AddCommands()
+     Cmd_AddCommand("tell", NULL);
+ 
+     Cmd_AddCommand("pause", NULL);
++    /* Forwarded to the server. See SV_Spectate_f / SV_Join_f. */
++    Cmd_AddCommand("spectate", NULL);
++    Cmd_AddCommand("join", NULL);
+     Cmd_AddCommand("kill", NULL);
+     Cmd_AddCommand("kick", NULL);
+ 
+diff --git a/NQ/cl_parse.c b/NQ/cl_parse.c
+index bdbb893..bd2b0ab 100644
+--- a/NQ/cl_parse.c
++++ b/NQ/cl_parse.c
+@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ #include "net.h"
+ #include "protocol.h"
+ #include "quakedef.h"
++#include "intermission.h"
+ #include "sbar.h"
+ #include "screen.h"
+ #include "server.h"
+@@ -1018,6 +1019,7 @@ CL_ParseServerMessage(void)
+ 	    break;
+ 
+ 	case svc_disconnect:
++	    IM_ReportDisconnect("Server disconnected");
+ 	    Host_EndGame("Server disconnected\n");
+ 
+ 	case svc_print:
+diff --git a/NQ/server.h b/NQ/server.h
+index c6a5db4..672180a 100644
+--- a/NQ/server.h
++++ b/NQ/server.h
+@@ -76,6 +76,7 @@ typedef struct client_s {
+     qboolean spawned;		// false = don't send datagrams
+     qboolean dropasap;		// has been told to go to another level
+     qboolean sendsignon;	// only valid before spawned
++    qboolean spectator;		// intermission: out of the fight, still connected
+ 
+     double last_message;	// reliable messages must be sent
+     // periodically
+diff --git a/NQ/sv_user.c b/NQ/sv_user.c
+index dbb745a..3f68350 100644
+--- a/NQ/sv_user.c
++++ b/NQ/sv_user.c
+@@ -964,6 +964,46 @@ SV_Begin_f(client_t *client)
+     client->spawned = true;
+ }
+ 
++/*
++ * intermission hands the person back to Claude between turns. They stay
++ * connected, but not as a target: no model, no collision, no damage. "join"
++ * puts them back through the normal spawn.
++ */
++static void
++SV_Spectate_f(client_t *client)
++{
++    edict_t *player;
++
++    if (!client->spawned || client->spectator)
++	return;
++    client->spectator = true;
++    player = client->edict;
++    player->v.movetype = MOVETYPE_NOCLIP;
++    player->v.solid = SOLID_NOT;
++    player->v.takedamage = DAMAGE_NO;
++    player->v.modelindex = 0;
++    player->v.effects = 0;
++    player->v.flags = (int)player->v.flags | FL_NOTARGET;
++    VectorCopy(vec3_origin, player->v.velocity);
++}
++
++static void
++SV_Join_f(client_t *client)
++{
++    edict_t *player;
++    int i;
++
++    if (!client->spawned || !client->spectator)
++	return;
++    client->spectator = false;
++    player = client->edict;
++    for (i = 0; i < NUM_SPAWN_PARMS; i++)
++	(&pr_global_struct->parm1)[i] = client->spawn_parms[i];
++    pr_global_struct->time = sv.time;
++    pr_global_struct->self = EDICT_TO_PROG(player);
++    PR_ExecuteProgram(pr_global_struct->PutClientInServer);
++}
++
+ /* ------------------------------------------------------------------------ */
+ 
+ /*
+@@ -1155,6 +1195,8 @@ static client_command_t client_commands[] = {
+     { "prespawn", SV_PreSpawn_f },
+     { "spawn", SV_Spawn_f },
+     { "begin", SV_Begin_f },
++    { "spectate", SV_Spectate_f },
++    { "join", SV_Join_f },
+     { NULL, NULL },
+ };
+ 
+diff --git a/common/in_sdl.c b/common/in_sdl.c
+index fcb7c6a..f5e9d00 100644
+--- a/common/in_sdl.c
++++ b/common/in_sdl.c
+@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ #include "console.h"
+ #include "cvar.h"
+ #include "input.h"
++#include "intermission.h"
+ #include "keys.h"
+ #include "mathlib.h"
+ #include "quakedef.h"
+@@ -609,6 +610,13 @@ IN_MouseMove(usercmd_t *cmd)
+     if (!mouse_available)
+ 	return;
+ 
++    {
++	int extra_x = 0, extra_y = 0;
++	IM_TakeMouse(&extra_x, &extra_y);
++	mouse_x += extra_x;
++	mouse_y += extra_y;
++    }
++
+     if (m_filter.value) {
+ 	mouse_x = (mouse_x + old_mouse_x) * 0.5;
+ 	mouse_y = (mouse_y + old_mouse_y) * 0.5;
+diff --git a/common/intermission.c b/common/intermission.c
+new file mode 100644
+index 0000000..f76c794
+--- /dev/null
++++ b/common/intermission.c
+@@ -0,0 +1,466 @@
++/*
++Copyright (C) 1996-1997 Id Software, Inc.
++
++This program is free software; you can redistribute it and/or
++modify it under the terms of the GNU General Public License
++as published by the Free Software Foundation; either version 2
++of the License, or (at your option) any later version.
++
++See the GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program; if not, write to the Free Software
++Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
++
++*/
++
++/*
++ * Paint frames into POSIX shared memory and take input from the intermission
++ * Claude Code plugin. Same contract as the Doom/Odamex build: without
++ * INTERMISSION_FRAMES this file does nothing a normal player would notice.
++ *
++ * INTERMISSION_FRAMES is a shared-memory prefix such as "/imab-". Each frame
++ * is raw RGB in a fresh object and its name is printed on stdout. The
++ * terminal reads the object and unlinks it.
++ *
++ * INTERMISSION_INPUT names a file holding one line:
++ *
++ *   <playing> <clicks> <key> <key> ...
++ *
++ * playing is 0 while the person is handed back to Claude. clicks counts
++ * clicks on the picture. keys are the codes the plugin already used for Doom:
++ * ASCII, the SDL2 arrow keycodes, and 0x20000000 for the left mouse button.
++ */
++
++#ifdef QW_HACK
++#include "quakedef.h"
++#include "intermission.h"
++
++void IM_SetPalette(const byte *palette) { (void)palette; }
++void IM_ExportFrame(void) {}
++void IM_ReadInput(void) {}
++void IM_TakeMouse(int *dx, int *dy) { (void)dx; (void)dy; }
++void IM_ReportDisconnect(const char *reason) { (void)reason; }
++qboolean IM_IsActive(void) { return false; }
++#endif
++
++#ifdef NQ_HACK
++
++#include "quakedef.h"
++
++#include "client.h"
++#include "cmd.h"
++#include "cvar.h"
++#include "intermission.h"
++#include "keys.h"
++#include "server.h"
++#include "host.h"
++#include "vid.h"
++
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#define IM_MOUSE_FIRE 0x20000000
++#define IM_FRAMES_IN_FLIGHT 8
++
++static byte im_palette[256 * 3];
++static qboolean im_have_palette;
++static qboolean im_playing = true;
++static int im_mouse_x;
++static int im_mouse_y;
++
++qboolean
++IM_IsActive(void)
++{
++    static int cached = -1;
++
++    if (cached < 0)
++	cached = getenv("INTERMISSION_FRAMES") != NULL;
++    return cached;
++}
++
++void
++IM_SetPalette(const byte *palette)
++{
++    if (!palette)
++	return;
++    memcpy(im_palette, palette, sizeof(im_palette));
++    im_have_palette = true;
++}
++
++void
++IM_TakeMouse(int *dx, int *dy)
++{
++    *dx += im_mouse_x;
++    *dy += im_mouse_y;
++    im_mouse_x = 0;
++    im_mouse_y = 0;
++}
++
++void
++IM_ReportDisconnect(const char *reason)
++{
++    const char *cursor;
++
++    if (!IM_IsActive())
++	return;
++    printf("@disconnected ");
++    for (cursor = reason ? reason : ""; *cursor; cursor++)
++	if (*cursor != '\n')
++	    putchar(*cursor);
++    putchar('\n');
++    fflush(stdout);
++}
++
++static void
++IM_ReportConnected(void)
++{
++    static qboolean reported;
++
++    if (reported || cls.state != ca_active)
++	return;
++    reported = true;
++    printf("@connected\n");
++}
++
++static void
++IM_ReportScore(void)
++{
++    static int kills = -1;
++    static int deaths = 0;
++    static int printed_deaths = -1;
++    static qboolean saw_alive;
++    static qboolean death_latched;
++    int next_kills;
++    int health;
++
++    if (cls.state != ca_active)
++	return;
++
++    /* Frags are other players. STAT_MONSTERS is the single-player tally. */
++    next_kills = cl.stats[STAT_FRAGS] + cl.stats[STAT_MONSTERS];
++    health = cl.stats[STAT_HEALTH];
++    if (health > 0) {
++	saw_alive = true;
++	death_latched = false;
++    } else if (saw_alive && !death_latched) {
++	deaths++;
++	death_latched = true;
++    }
++    if (next_kills == kills && deaths == printed_deaths)
++	return;
++    kills = next_kills;
++    printed_deaths = deaths;
++    printf("@score %d %d\n", kills, deaths);
++}
++
++static const unsigned IM_EXPORT_MIN_MS = 28; /* about 35 fps, matching Doom */
++
++void
++IM_ExportFrame(void)
++{
++    static unsigned frame;
++    static double last;
++    const char *prefix;
++    char name[64];
++    int fd;
++    int x, y;
++    size_t size;
++    byte *out;
++    byte *dest;
++    const byte *src;
++
++    prefix = getenv("INTERMISSION_FRAMES");
++    if (!prefix || !im_playing || !im_have_palette || !vid.buffer || !vid.width || !vid.height)
++	return;
++    if (last && realtime - last < IM_EXPORT_MIN_MS / 1000.0)
++	return;
++    last = realtime;
++
++    if (frame >= IM_FRAMES_IN_FLIGHT) {
++	snprintf(name, sizeof(name), "%s%u", prefix, frame - IM_FRAMES_IN_FLIGHT);
++	shm_unlink(name);
++    }
++    snprintf(name, sizeof(name), "%s%u", prefix, frame++);
++
++    size = (size_t)vid.width * vid.height * 3;
++    fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
++    if (fd < 0)
++	return;
++    if (ftruncate(fd, size) != 0) {
++	close(fd);
++	shm_unlink(name);
++	return;
++    }
++    out = mmap(NULL, size, PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    if (out == MAP_FAILED) {
++	shm_unlink(name);
++	return;
++    }
++
++    dest = out;
++    for (y = 0; y < vid.height; y++) {
++	src = vid.buffer + y * vid.rowbytes;
++	for (x = 0; x < vid.width; x++) {
++	    const byte *rgb = im_palette + src[x] * 3;
++	    *dest++ = rgb[0];
++	    *dest++ = rgb[1];
++	    *dest++ = rgb[2];
++	}
++    }
++    munmap(out, size);
++
++    printf("@frame %s %d %d\n", name, vid.width, vid.height);
++    IM_ReportConnected();
++    IM_ReportScore();
++    fflush(stdout);
++}
++
++#ifdef __APPLE__
++#include <ApplicationServices/ApplicationServices.h>
++#include <math.h>
++
++static const double IM_MOUSE_PER_PIXEL = 3.0;
++static const CGKeyCode IM_KEY_ESCAPE = 53;
++static qboolean im_locked;
++static CGPoint im_locked_at;
++
++static CGPoint
++IM_Cursor(void)
++{
++    CGEventRef event = CGEventCreate(NULL);
++    CGPoint point = CGEventGetLocation(event);
++    CFRelease(event);
++    return point;
++}
++
++typedef int CGSConnectionID;
++extern CGSConnectionID _CGSDefaultConnection(void);
++extern CGError CGSSetConnectionProperty(CGSConnectionID, CGSConnectionID, CFStringRef, CFTypeRef);
++
++static void
++IM_LockMouse(void)
++{
++    CGPoint point;
++
++    if (im_locked)
++	return;
++    {
++	CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
++	CGEventSourceSetLocalEventsSuppressionInterval(source, 0.0);
++	CFRelease(source);
++	CGSConnectionID connection = _CGSDefaultConnection();
++	CGSSetConnectionProperty(connection, connection, CFSTR("SetsCursorInBackground"), kCFBooleanTrue);
++    }
++    point = IM_Cursor();
++    im_locked_at = CGPointMake(round(point.x), round(point.y));
++    CGDisplayHideCursor(kCGDirectMainDisplay);
++    im_locked = true;
++}
++
++static void
++IM_ReleaseMouse(void)
++{
++    if (!im_locked)
++	return;
++    CGDisplayShowCursor(kCGDirectMainDisplay);
++    im_locked = false;
++}
++
++static void
++IM_LockedMotion(void)
++{
++    CGEventFlags flags;
++    CGPoint point;
++    int motion_x, motion_y;
++
++    if (!im_locked)
++	return;
++    flags = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState);
++    if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, IM_KEY_ESCAPE) ||
++	(flags & kCGEventFlagMaskCommand)) {
++	IM_ReleaseMouse();
++	return;
++    }
++    point = IM_Cursor();
++    if (point.x == im_locked_at.x && point.y == im_locked_at.y)
++	return;
++    CGWarpMouseCursorPosition(im_locked_at);
++    motion_x = (int)lround((point.x - im_locked_at.x) * IM_MOUSE_PER_PIXEL);
++    motion_y = (int)lround((point.y - im_locked_at.y) * IM_MOUSE_PER_PIXEL);
++    im_mouse_x += motion_x;
++    im_mouse_y += motion_y;
++}
++#else
++static void IM_LockMouse(void) {}
++static void IM_ReleaseMouse(void) {}
++static void IM_LockedMotion(void) {}
++#endif
++
++static int
++IM_KeyCode(long key)
++{
++    switch (key) {
++    case IM_MOUSE_FIRE:
++	return K_MOUSE1;
++    case 0x40000052:
++	return K_UPARROW;
++    case 0x40000051:
++	return K_DOWNARROW;
++    case 0x40000050:
++	return K_LEFTARROW;
++    case 0x4000004f:
++	return K_RIGHTARROW;
++    case 0x0d:
++	return K_ENTER;
++    case 0x09:
++	return K_TAB;
++    default:
++	if (key > 0 && key < 256)
++	    return (int)key;
++	return -1;
++    }
++}
++
++static void
++IM_SetPlaying(qboolean now)
++{
++    static float sfx = 0.7f;
++    static float bgm = 1.0f;
++
++    if (now == im_playing)
++	return;
++    im_playing = now;
++    if (im_playing) {
++	Cvar_SetValue("volume", sfx);
++	Cvar_SetValue("bgmvolume", bgm);
++    } else {
++	sfx = Cvar_VariableValue("volume");
++	bgm = Cvar_VariableValue("bgmvolume");
++	Cvar_SetValue("volume", 0);
++	Cvar_SetValue("bgmvolume", 0);
++	IM_ReleaseMouse();
++    }
++}
++
++/*
++ * On a shared server, step out of the fight while Claude has the person, and
++ * respawn when they come back. Offline, there is no one else, so pause.
++ * A join or a pause lands a moment later, so keep asking once a second.
++ */
++static void
++IM_FollowPlaying(void)
++{
++    static double next_ask;
++
++    if (realtime < next_ask)
++	return;
++    if (sv.active) {
++	if ((qboolean)sv.paused == im_playing)
++	    Cbuf_AddText("pause\n");
++	else
++	    return;
++    } else if (cls.state == ca_active) {
++	Cbuf_AddText(im_playing ? "join\n" : "spectate\n");
++    } else {
++	return;
++    }
++    next_ask = realtime + 1.0;
++}
++
++void
++IM_ReadInput(void)
++{
++    static const char *path;
++    static pid_t parent;
++    static int held[64];
++    static int held_count;
++    static long clicks;
++    static qboolean ready;
++    FILE *file;
++    char line[1024];
++    char *cursor;
++    char *end;
++    int next[64];
++    int next_count = 0;
++    int i, j;
++    long key;
++    long next_clicks;
++    qboolean still;
++
++    if (!IM_IsActive())
++	return;
++    if (!ready) {
++	path = getenv("INTERMISSION_INPUT");
++	parent = getppid();
++	ready = true;
++    }
++    if (!path)
++	return;
++
++    /* Claude Code stops the engine when it is done with it. If the terminal
++     * died first, this process is reparented and should quit rather than
++     * play on unseen. */
++    if (getppid() != parent || getppid() == 1)
++	exit(0);
++
++    IM_LockedMotion();
++    IM_FollowPlaying();
++
++    file = fopen(path, "r");
++    if (!file || !fgets(line, sizeof(line), file)) {
++	if (file)
++	    fclose(file);
++	return;
++    }
++    fclose(file);
++    /* Rewritten in place. A line without its newline is a write in progress. */
++    if (!strchr(line, '\n'))
++	return;
++
++    cursor = line;
++    IM_SetPlaying(strtol(cursor, &cursor, 10) != 0);
++    next_clicks = strtol(cursor, &cursor, 10);
++    for (;;) {
++	key = strtol(cursor, &end, 10);
++	if (end == cursor)
++	    break;
++	cursor = end;
++	if (next_count < (int)(sizeof(next) / sizeof(next[0]))) {
++	    int code = IM_KeyCode(key);
++	    if (code >= 0)
++		next[next_count++] = code;
++	}
++    }
++
++    if (im_playing && next_clicks != clicks && next_clicks > 0)
++	IM_LockMouse();
++    clicks = next_clicks;
++
++    for (i = 0; i < held_count; i++) {
++	still = false;
++	for (j = 0; j < next_count; j++)
++	    if (next[j] == held[i])
++		still = true;
++	if (!still)
++	    Key_Event(held[i], false);
++    }
++    for (j = 0; j < next_count; j++) {
++	still = false;
++	for (i = 0; i < held_count; i++)
++	    if (held[i] == next[j])
++		still = true;
++	if (!still)
++	    Key_Event(next[j], true);
++    }
++    for (j = 0; j < next_count; j++)
++	held[j] = next[j];
++    held_count = next_count;
++}
++
++#endif /* NQ_HACK */
+diff --git a/common/snd_dma.c b/common/snd_dma.c
+index 8e4852b..79e0a6a 100644
+--- a/common/snd_dma.c
++++ b/common/snd_dma.c
+@@ -279,8 +279,13 @@ S_Init(void)
+ void
+ S_ClearOverflow()
+ {
++    struct known_sfx *known;
++
++    /* Dedicated servers never call S_Init */
++    if (!known_sfx)
++	return;
+     S_StopAllSounds(true);
+-    struct known_sfx *known = known_sfx->overflow;
++    known = known_sfx->overflow;
+ 
+     while (known) {
+         for (int i = 0; i < known->num_sfx; i++) {
+diff --git a/common/sys_unix.c b/common/sys_unix.c
+index 35cd9dc..b7c9a60 100644
+--- a/common/sys_unix.c
++++ b/common/sys_unix.c
+@@ -72,6 +72,11 @@ Sys_UserDataDirectory()
+ {
+     static char unix_userdir[MAX_OSPATH];
+     const char *home = getenv("HOME");
++
++    /* The plugin passes -basedir at its own dist directory. Do not also
++     * write into ~/.tyrquake, which may be someone's real Quake config. */
++    if (getenv("INTERMISSION_FRAMES"))
++	return NULL;
+     if (home) {
+         qsnprintf(unix_userdir, sizeof(unix_userdir), "%s/.tyrquake", home);
+         return unix_userdir;
+diff --git a/common/vid_sdl.c b/common/vid_sdl.c
+index ba0ad70..db09c16 100644
+--- a/common/vid_sdl.c
++++ b/common/vid_sdl.c
+@@ -39,6 +39,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ #include "sound.h"
+ #include "sys.h"
+ #include "vid.h"
++#include "intermission.h"
+ #include "view.h"
+ #include "wad.h"
+ 
+@@ -203,6 +204,29 @@ VID_SetMode(const qvidmode_t *mode, const byte *palette)
+     qboolean mouse_grab;
+     const qvidformat_t *format;
+ 
++    /* No window: frames go to shared memory for the terminal pane. */
++    if (IM_IsActive()) {
++	qvidmode_t *headless = (qvidmode_t *)mode;
++	if (!headless->resolution.scale)
++	    headless->resolution.scale = 1;
++	IM_SetPalette(palette);
++	VID_InitColormap(palette);
++	VID_Mode_SetupViddef(mode, &vid);
++	vid.numpages = 1;
++	vid.aspect = 1;
++	if (!VID_AllocBuffers(vid.width, vid.height))
++	    Sys_Error("%s: not enough memory for %dx%d", __func__, vid.width, vid.height);
++	D_InitCaches(vid_surfcache, vid_surfcachesize);
++	vid_currentmode = mode;
++	vid.recalc_refdef = 1;
++	SCR_CheckResize();
++	Con_CheckResize();
++	Cvar_SetValue("vid_fullscreen", 0);
++	Cvar_SetValue("vid_width", vid.width);
++	Cvar_SetValue("vid_height", vid.height);
++	return true;
++    }
++
+     /* FIXME - hack to reset mouse grabs */
+     mouse_grab = _windowed_mouse.value;
+     if (mouse_grab) {
+@@ -295,6 +319,10 @@ VID_SetPalette(const byte *palette)
+ {
+     unsigned i, r, g, b;
+ 
++    IM_SetPalette(palette);
++    if (!sdl_format)
++	return;
++
+     switch (SDL_PIXELTYPE(sdl_format->format)) {
+     case SDL_PIXELTYPE_PACKED32:
+ 	for (i = 0; i < 256; i++) {
+@@ -352,6 +380,7 @@ VID_ProcessEvents()
+                 break;
+         }
+     }
++    IM_ReadInput();
+ }
+ 
+ void
+@@ -420,6 +449,11 @@ void
+ VID_Update(vrect_t *rects)
+ {
+     int i;
++
++    if (IM_IsActive()) {
++	IM_ExportFrame();
++	return;
++    }
+     vrect_t *prect;
+     vrect_t rect;
+     vrect_t fullrect;
+diff --git a/include/intermission.h b/include/intermission.h
+new file mode 100644
+index 0000000..b9954be
+--- /dev/null
++++ b/include/intermission.h
+@@ -0,0 +1,18 @@
++/*
++ * Frame export and input for the intermission Claude Code plugin.
++ * Inactive unless INTERMISSION_FRAMES is set, so a normal TyrQuake build
++ * behaves as upstream.
++ */
++#ifndef INTERMISSION_H
++#define INTERMISSION_H
++
++#include "qtypes.h"
++
++void IM_SetPalette(const byte *palette);
++void IM_ExportFrame(void);
++void IM_ReadInput(void);
++void IM_TakeMouse(int *dx, int *dy);
++void IM_ReportDisconnect(const char *reason);
++qboolean IM_IsActive(void);
++
++#endif

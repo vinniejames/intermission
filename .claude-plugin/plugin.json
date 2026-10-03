@@ -1,11 +1,11 @@
 {
   "name": "intermission",
   "displayName": "intermission",
-  "version": "0.1.4",
-  "description": "Play Doom deathmatch while Claude works, and get handed back when it's done",
-  "author": { "name": "Jarrod Watts", "url": "https://github.com/jarrodwatts" },
-  "homepage": "https://github.com/jarrodwatts/intermission",
-  "repository": "https://github.com/jarrodwatts/intermission",
+  "version": "0.2.0",
+  "description": "Play Quake deathmatch while Claude works, and get handed back when it's done",
+  "author": { "name": "Vinnie James", "url": "https://github.com/vinniejames" },
+  "homepage": "https://github.com/vinniejames/intermission",
+  "repository": "https://github.com/vinniejames/intermission",
   "license": "MIT",
-  "keywords": ["doom", "game", "multiplayer", "deathmatch", "mod", "odamex", "freedoom"]
+  "keywords": ["quake", "game", "multiplayer", "deathmatch", "mod", "tyrquake", "shareware"]
 }

@@ -1,6 +1,7 @@
 // Catches keys and clicks over the game picture and posts what is held, which
 // the hooks module writes to the engine's input file. Each click also asks the
 // engine to lock the cursor, which it then reads for mouse-look itself.
+// Key codes stay what the Doom build used; TyrQuake translates them.
 //
 // The terminal reports presses, never releases. A key counts as held until
 // its auto-repeat stops: long after a single press, because the first repeat
